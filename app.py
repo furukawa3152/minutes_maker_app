@@ -24,19 +24,72 @@ def load_credentials():
 # ログファイルのパス
 LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / "usage_log.csv"
+MINUTES_DIR = LOG_DIR / "minutes"
 
 def init_log_file():
-    """ログファイルを初期化（存在しない場合はヘッダーを作成）"""
+    """ログファイルを初期化（存在しない場合はヘッダーを作成、既存の場合はヘッダーを更新）"""
     LOG_DIR.mkdir(exist_ok=True)
+    MINUTES_DIR.mkdir(exist_ok=True)
+    
+    expected_headers = [
+        "実行日時", "ファイル名", "ファイルサイズ(MB)", 
+        "処理時間(秒)", "ステータス", "エラーメッセージ", "議事録ファイル"
+    ]
+    
     if not LOG_FILE.exists():
+        # 新規作成
         with open(LOG_FILE, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "実行日時", "ファイル名", "ファイルサイズ(MB)", 
-                "処理時間(秒)", "ステータス", "エラーメッセージ"
-            ])
+            writer.writerow(expected_headers)
+    else:
+        # 既存ファイルのヘッダーを確認
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                headers = next(reader, None)
+                if headers != expected_headers:
+                    # ヘッダーが異なる場合、既存データを読み込んで新しい形式で書き直す
+                    rows = list(reader)
+                    # バックアップを作成
+                    backup_file = LOG_FILE.with_suffix('.csv.backup')
+                    import shutil
+                    shutil.copy2(LOG_FILE, backup_file)
+                    
+                    # 新しい形式で書き直す
+                    with open(LOG_FILE, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(expected_headers)
+                        # 既存のデータを書き直す（議事録ファイル列は空）
+                        for row in rows:
+                            # 既存の列数に応じて調整
+                            while len(row) < len(expected_headers) - 1:
+                                row.append("")
+                            row.append("")  # 議事録ファイル列を追加
+                            writer.writerow(row)
+        except Exception:
+            # エラーが発生した場合は新規作成
+            pass
 
-def log_usage(filename, filesize_mb, processing_time, status, error_msg=""):
+def save_minutes(minutes_text, original_filename):
+    """議事録をファイルに保存し、ファイルパスを返す"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # ファイル名から拡張子を除いた部分を取得
+        base_name = Path(original_filename).stem
+        # ファイル名に使用できない文字を置換
+        safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in base_name)
+        minutes_filename = f"{timestamp}_{safe_name}.md"
+        minutes_path = MINUTES_DIR / minutes_filename
+        
+        with open(minutes_path, "w", encoding="utf-8") as f:
+            f.write(minutes_text)
+        
+        return str(minutes_path)
+    except Exception as e:
+        st.warning(f"議事録の保存に失敗しました: {e}")
+        return ""
+
+def log_usage(filename, filesize_mb, processing_time, status, error_msg="", minutes_file=""):
     """使用ログをCSVに記録"""
     try:
         with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
@@ -47,7 +100,8 @@ def log_usage(filename, filesize_mb, processing_time, status, error_msg=""):
                 f"{filesize_mb:.2f}",
                 f"{processing_time:.2f}",
                 status,
-                error_msg
+                error_msg,
+                minutes_file
             ])
     except Exception as e:
         st.warning(f"ログの記録に失敗しました: {e}")
@@ -194,7 +248,10 @@ if uploaded_file is not None and st.button("議事録を作成する"):
             progress_bar.progress(100)
             status_text.text("完了！")
 
-            # 5. 結果表示
+            # 5. 議事録をファイルに保存
+            minutes_file_path = save_minutes(response.text, filename)
+
+            # 6. 結果表示
             st.subheader("📝 作成された議事録")
             st.markdown(response.text)
 
@@ -212,12 +269,12 @@ if uploaded_file is not None and st.button("議事録を作成する"):
             # ログ記録（成功）
             log_status = "成功"
             processing_time = time.time() - start_time
-            log_usage(filename, filesize_mb, processing_time, log_status, "")
+            log_usage(filename, filesize_mb, processing_time, log_status, "", minutes_file_path)
 
         except google_exceptions.ServiceUnavailable as e:
             error_message = f"ServiceUnavailable: {str(e)}"
             processing_time = time.time() - start_time
-            log_usage(filename, filesize_mb, processing_time, log_status, error_message)
+            log_usage(filename, filesize_mb, processing_time, log_status, error_message, "")
             
             st.error("❌ サービスが一時的に利用できません（DNS解決エラー）")
             st.warning("""
@@ -231,21 +288,21 @@ if uploaded_file is not None and st.button("議事録を作成する"):
         except google_exceptions.DeadlineExceeded as e:
             error_message = f"DeadlineExceeded: {str(e)}"
             processing_time = time.time() - start_time
-            log_usage(filename, filesize_mb, processing_time, log_status, error_message)
+            log_usage(filename, filesize_mb, processing_time, log_status, error_message, "")
             
             st.error("⏱️ リクエストがタイムアウトしました")
             st.warning("音声ファイルが大きい場合、処理に時間がかかることがあります。もう一度お試しください。")
         except google_exceptions.PermissionDenied as e:
             error_message = f"PermissionDenied: {str(e)}"
             processing_time = time.time() - start_time
-            log_usage(filename, filesize_mb, processing_time, log_status, error_message)
+            log_usage(filename, filesize_mb, processing_time, log_status, error_message, "")
             
             st.error("🔐 APIキーが無効です")
             st.warning("APIキーを確認してください。Google AI Studio (https://aistudio.google.com/) でAPIキーを取得できます。")
         except Exception as e:
             error_message = str(e)
             processing_time = time.time() - start_time
-            log_usage(filename, filesize_mb, processing_time, log_status, error_message)
+            log_usage(filename, filesize_mb, processing_time, log_status, error_message, "")
             
             error_msg = str(e)
             if "DNS" in error_msg or "DNS resolution" in error_msg:
